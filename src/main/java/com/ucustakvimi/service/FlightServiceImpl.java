@@ -11,6 +11,7 @@ import org.hibernate.service.spi.ServiceException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
@@ -50,11 +51,11 @@ public class FlightServiceImpl implements FlightService {
 		try {
 			methodType = MethodType.methodType(ArrayList.class, String.class,
 					String.class, String.class, String.class);
-			methodHandle = lookup.findStatic(Flight.class, "searchFlight"
-					+ flightAirway, methodType);
+			methodHandle = lookup.findVirtual(Flight.class,
+					"searchFlight" + flightAirway, methodType);
 
-			results = (ArrayList) methodHandle.invokeExact(fromAirportCode,
-					toAirportCode, flightDate, searchLanguage);
+			results = (ArrayList) methodHandle.invokeExact(flight,
+					fromAirportCode, toAirportCode, flightDate, searchLanguage);
 
 		} catch (NoSuchMethodException e) {
 			// TODO Auto-generated catch block
@@ -94,7 +95,7 @@ public class FlightServiceImpl implements FlightService {
 	@Override
 	public List<FlightSearch> listAll(FlightUser user) {
 
-		FlightUser persistentUser = userRepository.findOne(user.getId());
+		FlightUser persistentUser = userRepository.findById(user.getId()).orElse(null);;
 
 		List result = flightSearchRepository.findByUser(persistentUser);
 

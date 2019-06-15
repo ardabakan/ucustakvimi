@@ -11,10 +11,17 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.math.BigDecimal;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;
+import java.security.KeyManagementException;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -29,11 +36,46 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.http.client.config.CookieSpecs;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.protocol.HttpClientContext;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLContextBuilder;
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
+import org.apache.http.conn.ssl.TrustStrategy;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.protocol.HttpContext;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Document.OutputSettings;
+import org.jsoup.nodes.Entities;
+import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestTemplate;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ucustakvimi.repository.AirportRepository;
+import com.ucustakvimi.repository.AirwaysRepository;
+import com.ucustakvimi.rest.FlightRestService;
+import com.ucustakvimi.util.RestTemplateWithCookies;
+import com.ucustakvimi.util.StatefulRestTemplateInterceptor;
 
 import au.id.jericho.lib.html.Element;
 import au.id.jericho.lib.html.Segment;
@@ -41,15 +83,19 @@ import au.id.jericho.lib.html.Source;
 import au.id.jericho.lib.html.StartTag;
 import au.id.jericho.lib.html.Tag;
 
-import com.ucustakvimi.repository.AirportRepository;
-
 @Component
 public class Flight implements Comparable<Flight> {
 
 	private static final Logger logger = LoggerFactory.getLogger(Flight.class);
 
 	@Autowired
-	private static AirportRepository airportRepository;
+	private AirportRepository airportRepository;
+
+	@Autowired
+	private AirwaysRepository airwaysRepository;
+
+	@Autowired
+	FlightRestService flightRestService;
 
 	public static String ATLASJET_COOKIE = "";
 
@@ -69,7 +115,7 @@ public class Flight implements Comparable<Flight> {
 
 	public static String BRITISH_AIRWAYS_COOKIE = "";
 
-	public static String USER_AGENT = "Mozilla/5.0 (Linux; Android 5.1.1; SM-G928X Build/LMY47X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.83 Mobile Safari/537.36";
+	public static String USER_AGENT = "Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:63.0) Gecko/20100101 Firefox/63.0";
 
 	public String flightNo = "";
 
@@ -157,9 +203,8 @@ public class Flight implements Comparable<Flight> {
 		return sb.toString();
 	}
 
-	public static ArrayList<Flight> searchAllFlight(
-			String[] airwaysCompaniesToSearch, String fromAirportCode,
-			String toAirportCode, String flightDate) {
+	public ArrayList<Flight> searchAllFlight(String[] airwaysCompaniesToSearch,
+			String fromAirportCode, String toAirportCode, String flightDate) {
 
 		ArrayList<Flight> allResults = new ArrayList<Flight>();
 
@@ -176,8 +221,8 @@ public class Flight implements Comparable<Flight> {
 			try {
 				methodType = MethodType.methodType(ArrayList.class,
 						String.class, String.class, String.class, String.class);
-				methodHandle = lookup.findStatic(Flight.class, "searchFlight"
-						+ company, methodType);
+				methodHandle = lookup.findVirtual(Flight.class,
+						"searchFlight" + company, methodType);
 
 				tempResults = (ArrayList) methodHandle.invokeExact(
 						fromAirportCode, toAirportCode, flightDate, "tr");
@@ -200,7 +245,7 @@ public class Flight implements Comparable<Flight> {
 		return allResults;
 	}
 
-	public static ArrayList<Flight> searchFlightKHY(String fromAirportCode,
+	public ArrayList<Flight> searchFlightKHY(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		ArrayList<Flight> onurFlights = new ArrayList<Flight>();
@@ -212,8 +257,8 @@ public class Flight implements Comparable<Flight> {
 
 		String[] months = new String[] {
 
-		"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
-				"NOV", "DEC" };
+				"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP",
+				"OCT", "NOV", "DEC" };
 		int monthIndex = Integer.parseInt(flightDate.substring(4, 6)) - 1;
 
 		String month = months[monthIndex];
@@ -253,7 +298,8 @@ public class Flight implements Comparable<Flight> {
 
 					tempFlight = new Flight();
 
-					tempFromAirport =  airportRepository.findByCode(fromAirportCode);
+					tempFromAirport = airportRepository
+							.findByCode(fromAirportCode);
 					tempToAirport = airportRepository.findByCode(toAirportCode);
 
 					tempFlight.setFeeAdult(feeAdult);
@@ -296,7 +342,7 @@ public class Flight implements Comparable<Flight> {
 
 	}
 
-	public static ArrayList<Flight> searchFlightOHY(String fromAirportCode,
+	public ArrayList<Flight> searchFlightOHY(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		// https://book.onurair.com/web/RezvEntry.xhtml --> Referer:
@@ -362,8 +408,8 @@ public class Flight implements Comparable<Flight> {
 				return onurFlights;
 			}
 
-			cevap = cevap.substring(cevap
-					.indexOf("<!-- segmentGroup begin		 -->"));
+			cevap = cevap.substring(
+					cevap.indexOf("<!-- segmentGroup begin		 -->"));
 
 			/*
 			 * String cevap = callOnur(
@@ -394,7 +440,8 @@ public class Flight implements Comparable<Flight> {
 				segment = (Segment) i.next();
 				divContent = segment.toString();
 
-				if (divContent.indexOf("<div class=\"flight__row one\">") != -1) {
+				if (divContent
+						.indexOf("<div class=\"flight__row one\">") != -1) {
 
 					String departureTime = extractByStartWord(divContent,
 							"<span class=\"from-t from__hour\">", "</span>");
@@ -439,7 +486,8 @@ public class Flight implements Comparable<Flight> {
 
 					tempFlight = new Flight();
 
-					tempFromAirport = airportRepository.findByCode(fromAirportCode);
+					tempFromAirport = airportRepository
+							.findByCode(fromAirportCode);
 					tempToAirport = airportRepository.findByCode(toAirportCode);
 
 					tempFlight.setFeeAdult(feeAdult);
@@ -474,14 +522,14 @@ public class Flight implements Comparable<Flight> {
 			e.printStackTrace();
 		}
 
-		onurFlights = new ArrayList<Flight>(new LinkedHashSet<Flight>(
-				onurFlights));
+		onurFlights = new ArrayList<Flight>(
+				new LinkedHashSet<Flight>(onurFlights));
 
 		return onurFlights;
 
 	}
 
-	public static ArrayList<Flight> searchFlightSXS(String fromAirportCode,
+	public ArrayList<Flight> searchFlightSXS(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		callSunexpress("https://m.sunexpress.com/index.xhtml",
@@ -528,9 +576,8 @@ public class Flight implements Comparable<Flight> {
 
 			logResponse("SUNEXPRESS2.html", cevap);
 
-			cevap = cevap
-					.substring(cevap
-							.indexOf("<ul style=\"margin: 0; padding-left: 15px; padding-top: 8px;\">"));
+			cevap = cevap.substring(cevap.indexOf(
+					"<ul style=\"margin: 0; padding-left: 15px; padding-top: 8px;\">"));
 
 			/*
 			 * String cevap = callOnur(
@@ -596,7 +643,8 @@ public class Flight implements Comparable<Flight> {
 
 					tempFlight = new Flight();
 
-					tempFromAirport = airportRepository.findByCode(fromAirportCode);
+					tempFromAirport = airportRepository
+							.findByCode(fromAirportCode);
 					tempToAirport = airportRepository.findByCode(toAirportCode);
 
 					tempFlight.setFeeAdult(feeAdult);
@@ -631,15 +679,15 @@ public class Flight implements Comparable<Flight> {
 			e.printStackTrace();
 		}
 
-		sunexpressFlights = new ArrayList<Flight>(new LinkedHashSet<Flight>(
-				sunexpressFlights));
+		sunexpressFlights = new ArrayList<Flight>(
+				new LinkedHashSet<Flight>(sunexpressFlights));
 
 		return sunexpressFlights;
 
 	}
 
 	@SuppressWarnings("unchecked")
-	public static ArrayList<Flight> searchFlightPGT(String fromAirportCode,
+	public ArrayList<Flight> searchFlightPGT2(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		ArrayList<Flight> pegasusFlights = new ArrayList<Flight>();
@@ -652,26 +700,26 @@ public class Flight implements Comparable<Flight> {
 
 		// 20080523 --> 23/05/2008 --> 23%2F05%2F2008
 
-		String flightDateConverted = flightDate.substring(6, 8) + "/"
-				+ flightDate.substring(4, 6) + "/" + flightDate.substring(0, 4);
+		String flightDateConverted = flightDate.substring(0, 4) + "-"
+				+ flightDate.substring(4, 6) + "-" + flightDate.substring(6, 8);
 
 		String flightDateWithDots = flightDate.substring(6, 8) + "."
 				+ flightDate.substring(4, 6) + "." + flightDate.substring(0, 4);
 
 		String flightDateEncoded = URLEncoder.encode(flightDateConverted);
 
-		// https://book.flypgs.com/Common/MemberRezvResults.jsp?activeLanguage=TR&DEPPORT=IST&ARRPORT=ADB&LBLDEPPORT=Istanbul-Atatürk&LBLARRPORT=Izmir&TRIPTYPE=O&DEPDATE=18/11/2016&RETDATE=18/11/2016&ADULT=1&CHILD=0&INFANT=0&STUDENT=0&SOLDIER=0&CURRENCY=TRY&LC=TR&FLEX&userId=6353698e4837a1fbbcd5689aa53f0201&resetErrors=T&clickedButton=btnSearch&DEPDATEO=3&RETDATEO=3&activeLanguage=TR
-
-		String url = "https://book.flypgs.com/Common/MemberRezvResults.jsp?activeLanguage=TR&DEPPORT=##FROM_AIRPORT##&ARRPORT=##TO_AIRPORT##&LBLDEPPORT=Istanbul-Atatürk&LBLARRPORT=Izmir&TRIPTYPE=O&DEPDATE=##DEPARTURE_DATE##&RETDATE=##DEPARTURE_DATE##&ADULT=1&CHILD=0&INFANT=0&STUDENT=0&SOLDIER=0&CURRENCY=TRY&LC=TR&FLEX&userId=6353698e4837a1fbbcd5689aa53f0201&resetErrors=T&clickedButton=btnSearch&DEPDATEO=3&RETDATEO=3&activeLanguage=TR";
+		// https://web.flypgs.com/booking?language=TR&adultCount=1&childCount=0&infantCount=0&soldierCount=0&arrivalPort=ADB&departurePort=IST_SAW&currency=TL&dateOption=1&departureDate=2018-12-28
+		String url = "https://web.flypgs.com/booking?language=TR&adultCount=1&childCount=0&infantCount=0&soldierCount=0&arrivalPort=ADB&departurePort=IST_SAW&currency=TL&dateOption=1&departureDate=##DEPARTURE_DATE##";
 
 		if (language.equals("en")) {
-			url = "https://book.flypgs.com/Common/MemberRezvResults.jsp?activeLanguage=EN&DEPPORT=##FROM_AIRPORT##&ARRPORT=##TO_AIRPORT##&LBLDEPPORT=Istanbul-Atatürk&LBLARRPORT=Izmir&TRIPTYPE=O&DEPDATE=##DEPARTURE_DATE##&RETDATE=##DEPARTURE_DATE##&ADULT=1&CHILD=0&INFANT=0&STUDENT=0&SOLDIER=0&CURRENCY=TRY&LC=TR&FLEX&userId=6353698e4837a1fbbcd5689aa53f0201&resetErrors=T&clickedButton=btnSearch&DEPDATEO=3&RETDATEO=3&activeLanguage=TR";
+			url = "https://web.flypgs.com/booking?language=TR&adultCount=1&childCount=0&infantCount=0&soldierCount=0&arrivalPort=ADB&departurePort=IST_SAW&currency=TL&dateOption=1&departureDate=##DEPARTURE_DATE##";
 		}
 
 		url = StringUtils.replace(url, "##FROM_AIRPORT##", fromAirportIATACode);
 		url = StringUtils.replace(url, "##TO_AIRPORT##", toAirportIATACode);
 		url = StringUtils.replace(url, "##DEPARTURE_DATE##", flightDateEncoded);
 
+		// String cevapFirst = callPegasus("https://www.flypgs.com", true);
 		String cevap = callPegasus(url, true);
 		String feeAdult = "";
 
@@ -687,8 +735,7 @@ public class Flight implements Comparable<Flight> {
 
 			}
 
-			cevap = extractByStartWord(
-					cevap,
+			cevap = extractByStartWord(cevap,
 					"<div style='display:none;' class='threePackageFlightDayContainerDEP' id='flightPrevDayContainerDEP'>",
 					"<span class=\"text\">Para Birimini Değiştir</span>");
 
@@ -738,9 +785,8 @@ public class Flight implements Comparable<Flight> {
 				int iFeeAdult = 0;
 				int feeStartIndex = content
 						.indexOf("<span class='flightPrice'>") + 26;
-				int feeEndIndex = content.substring(feeStartIndex).indexOf(
-						"<sup>")
-						+ feeStartIndex;
+				int feeEndIndex = content.substring(feeStartIndex)
+						.indexOf("<sup>") + feeStartIndex;
 
 				feeAdult = content.substring(feeStartIndex, feeEndIndex).trim();
 
@@ -829,8 +875,8 @@ public class Flight implements Comparable<Flight> {
 			e.printStackTrace();
 		}
 
-		pegasusFlights = new ArrayList<Flight>(new LinkedHashSet<Flight>(
-				pegasusFlights));
+		pegasusFlights = new ArrayList<Flight>(
+				new LinkedHashSet<Flight>(pegasusFlights));
 
 		return pegasusFlights;
 
@@ -855,11 +901,11 @@ public class Flight implements Comparable<Flight> {
 				&& fToCompare.getFlightCode().equals(getFlightCode());
 	}
 
-	public static ArrayList<Flight> searchFlightBritishAirways(
-			String fromAirportCode, String toAirportCode, String flightDate,
-			String language) {
+	public ArrayList<Flight> searchFlightBritishAirways(String fromAirportCode,
+			String toAirportCode, String flightDate, String language) {
 
-		callBritishAirways("http://www.britishairways.com/travel/fx/public/en_gb");
+		callBritishAirways(
+				"http://www.britishairways.com/travel/fx/public/en_gb");
 
 		ArrayList<Flight> britishAirwaysFlights = new ArrayList<Flight>();
 
@@ -870,8 +916,9 @@ public class Flight implements Comparable<Flight> {
 
 		/*
 		 * 
-		 * Airport tempFromAirport = airportRepository.findByCode(fromAirportCode);
-		 * Airport tempToAirport = airportRepository.findByCode(toAirportCode);
+		 * Airport tempFromAirport =
+		 * airportRepository.findByCode(fromAirportCode); Airport tempToAirport
+		 * = airportRepository.findByCode(toAirportCode);
 		 * 
 		 * String fromAirportIATACode = tempFromAirport.getIataCode(); String
 		 * toAirportIATACode = tempToAirport.getIataCode(); // 20080523 -->
@@ -916,8 +963,9 @@ public class Flight implements Comparable<Flight> {
 		String sTimestamp = cevap.substring(timestampParameterIndex + 25,
 				timestampParameterIndex + 35);
 
-		cevap = callBritishAirways("http://www.britishairways.com/travel/fx/public/en_gb?eId="
-				+ sEid + "&timestamp=" + sTimestamp);
+		cevap = callBritishAirways(
+				"http://www.britishairways.com/travel/fx/public/en_gb?eId="
+						+ sEid + "&timestamp=" + sTimestamp);
 
 		// System.out.println(cevap);
 
@@ -1069,7 +1117,7 @@ public class Flight implements Comparable<Flight> {
 	}
 
 	@SuppressWarnings({ "deprecation", "unused", "unchecked", "rawtypes" })
-	public static ArrayList searchFlightKKK(String fromAirportCode,
+	public ArrayList searchFlightKKK(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		ArrayList atlasFlights = new ArrayList();
@@ -1082,130 +1130,339 @@ public class Flight implements Comparable<Flight> {
 
 		// 20080523 --> 23/05/2008 --> 23%2F05%2F2008
 
-		String flightDateConverted = flightDate.substring(6, 8) + "/"
-				+ flightDate.substring(4, 6) + "/" + flightDate.substring(0, 4);
+		/*
+		 * direction:ONEWAY currency:TRY default:true pageHash:yuUnAX2TQr
+		 * fromAirportCode0:IST fromCity0:ISTANBUL toCity0:IZMIR
+		 * toAirportCode0:ADB test: date0:2019-04-05 date1: adult:1 student:0
+		 * child:0 infant:0 seniorCitizen:0 military:
+		 */
+
+		String flightDateConverted = flightDate.substring(0, 4) + "-"
+				+ flightDate.substring(4, 6) + "-" + flightDate.substring(6, 8);
 
 		String flightDateEncoded = URLEncoder.encode(flightDateConverted);
 
-		// first call to get a session and cookie
-		/*
-		 * callAtlasjet("https://online.atlasglb.com/AtlasOnline/availability.kk"
-		 * , true, "http://www.atlasglb.com/");
-		 */
-		callAtlasjet("https://online.atlasglb.com/AtlasOnline/sessionref.jsp",
-				false, "http://www.atlasglb.com/");
+		HttpHeaders headers = new HttpHeaders();
+		headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 
-		String url = "https://online.atlasglb.com/AtlasOnline/availability.kk?from_input=&from=##FROM_AIRPORT##&to_input=&to=##TO_AIRPORT##&lang=TR&direction=1&depdate=##DEPARTURE_DATE##&retdate=08%2F06%2F2011&adult=1&yp=0&chd=0&inf=0&sc=0&stu=0&tsk=0&refid=REFERERDELETE&paramstatus=1&openjaw&bannerSize=200x200";
+		MultiValueMap<String, String> map = new LinkedMultiValueMap<String, String>();
+		map.add("direction", "ONEWAY");
+		map.add("fromAirportCode0", fromAirportIATACode);
+		map.add("toAirportCode0", toAirportIATACode);
+		map.add("currency", "TRY");
+		map.add("date0", flightDateConverted);
+		map.add("adult", "1");
+		map.add("pageHash", "yuUnAX2TQr");
 
-		// IST AYT 28%2F04%2F2009 şeklinde
+		HttpComponentsClientHttpRequestFactory clientHttpRequestFactory = new HttpComponentsClientHttpRequestFactory(
+				HttpClientBuilder.create().build());
 
-		url = StringUtils.replace(url, "##FROM_AIRPORT##", fromAirportIATACode);
-		url = StringUtils.replace(url, "##TO_AIRPORT##", toAirportIATACode);
-		url = StringUtils.replace(url, "##DEPARTURE_DATE##", flightDateEncoded);
+		RestTemplateWithCookies restTemplate = new RestTemplateWithCookies(
+				clientHttpRequestFactory);
 
-		String buyLinkUrl = url;
+		String cookieResponse = restTemplate
+				.getForObject("https://www.atlasglb.com", String.class);
 
-		// System.out.println(buyLinkUrl);
+		HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<MultiValueMap<String, String>>(
+				map, headers);
 
-		String cevap = callAtlasjet(url, true, "https://www.atlasglb.com/tr");
+		ResponseEntity<String> response = restTemplate.postForEntity(
+				"https://www.atlasglb.com/rezervasyon/ucus-secim", request,
+				String.class);
+
+		String cevap = response.getBody();
 
 		cevap = StringUtils.strip(cevap);
 
-		Source source = new Source(cevap);
+		OutputSettings settings = new OutputSettings();
+		settings.escapeMode(Entities.EscapeMode.xhtml);
 
-		List segments = source.findAllElements(Tag.TR);
+		Document doc = Jsoup.parse(cevap);
+		doc.outputSettings().escapeMode(Entities.EscapeMode.xhtml);
 
-		String trContent = "";
-		Segment segment = null;
+		Elements lis = doc.select(
+				"div.flightList > ul > li.flightRow > div:not(.collapse)");
+
 		Flight tempFlight = null;
 
-		String tempDepartureTime = "";
-		String tempFlightCode = "";
+		for (org.jsoup.nodes.Element li : lis) {
 
-		for (Iterator iterator = segments.iterator(); iterator.hasNext();) {
+			String tempFlightCode = li.select("span.fly").text().trim();
 
-			segment = (Segment) iterator.next();
+			String tempDepartureTime = li.select("h4").get(0).text().trim()
+					.replace(":", "");
 
-			trContent = segment.getSourceText();
+			String fee = li.select("span.flyPrice").get(0).text().trim()
+					.split(" ", 2)[0];
 
-			int indexATLJET = trContent.indexOf("<tr class=\"darkLine\">");
+			logResponse("ATLAS" + System.currentTimeMillis() + ".html",
+					li.toString());
 
-			// biletler içeren tr buldun
-			if (indexATLJET != -1) {
+			tempFlight = new Flight();
 
-				Source sourceTD = new Source(trContent);
+			tempFlight.setFeeAdult(fee);
 
-				List segmentsTD = sourceTD.findAllElements(Tag.TD);
+			tempFlight.setFromAirportCode(fromAirportCode);
+			tempFlight.setFromAirportName(tempFromAirport.getName());
+			tempFlight.setToAirportCode(toAirportCode);
+			tempFlight.setToAirportName(tempToAirport.getName());
+			tempFlight.setDepartureTime(tempDepartureTime);
+			tempFlight.setFlightNo(tempFlightCode);
+			tempFlight.setFlightCode(tempFlightCode);
 
-				Segment segmentTD = null;
-				String tdContent = null;
+			Airway a = airwaysRepository.findByCode("KKK");
 
-				String departure = "";
-				String fee = "";
-				String flightNo = "";
+			tempFlight.setAirwayCode(a.getCode());
+			tempFlight.setAirwayName(a.getName());
+			tempFlight.setAirwayUrl(a.getUrl());
+			tempFlight.setAirwayTelephone(a.getCallCenter());
 
-				Segment segmentDeparture = (Segment) segmentsTD.get(0);
-				Segment segmentFlightNo = (Segment) segmentsTD.get(4);
-				Segment segmentFee = (Segment) segmentsTD.get(5);
+			tempFlight.setDepartureDate(flightDate);
 
-				String contentDeparture = segmentDeparture.getSourceText();
-				String contentFee = segmentFee.getSourceText();
-				String contentFlightNo = segmentFlightNo.getSourceText();
+			String url = "https://online.atlasglb.com/AtlasOnline/availability.kk?from_input=&from=##FROM_AIRPORT##&to_input=&to=##TO_AIRPORT##&lang=TR&direction=1&depdate=##DEPARTURE_DATE##&retdate=08%2F06%2F2011&adult=1&yp=0&chd=0&inf=0&sc=0&stu=0&tsk=0&refid=REFERERDELETE&paramstatus=1&openjaw&bannerSize=200x200";
 
-				departure = extractByStartWord(contentDeparture,
-						"<td style=\";background:#e6e6e6;\">", "</td>").trim();
-				departure = departure.replaceFirst(":", "");
+			// IST AYT 28%2F04%2F2009 şeklinde
 
-				fee = extractByStartWord(contentFee, "data-flight=", "</label>")
-						.trim();
-				fee = extractByStartWord(fee, "\">", "TL").trim();
+			url = StringUtils.replace(url, "##FROM_AIRPORT##",
+					fromAirportIATACode);
+			url = StringUtils.replace(url, "##TO_AIRPORT##", toAirportIATACode);
+			url = StringUtils.replace(url, "##DEPARTURE_DATE##",
+					flightDateEncoded);
 
-				flightNo = extractByStartWord(contentFlightNo,
-						"<td  style=\";background:#e6e6e6;\"  title=\"\" >",
-						"</td>").trim();
+			String buyLinkUrl = url;
 
-				if (flightNo.equals("")) {
-					continue;
-				}
+			tempFlight.setBuyLink(buyLinkUrl);
 
-				tempFlight = new Flight();
-
-				if (fee.trim().equals("")) {
-					continue;
-				}
-
-				double d = Double.parseDouble(fee);
-				int iFeeFullAdult = (int) d;
-
-				tempFlight.setFeeAdult("" + iFeeFullAdult);
-
-				tempFlight.setFromAirportCode(fromAirportCode);
-				tempFlight.setFromAirportName(tempFromAirport.getName());
-				tempFlight.setToAirportCode(toAirportCode);
-				tempFlight.setToAirportName(tempToAirport.getName());
-				tempFlight.setDepartureTime(departure);
-				// tempFlight.setArrivalTime(arrivalTime);
-				tempFlight.setFlightNo(flightNo);
-				tempFlight.setFlightCode(flightNo);
-
-				Airway a = Airway.getAirwaysByCode("KKK");
-
-				tempFlight.setAirwayCode(a.getCode());
-				tempFlight.setAirwayName(a.getName());
-				tempFlight.setAirwayUrl(a.getUrl());
-				tempFlight.setAirwayTelephone(a.getCallCenter());
-
-				tempFlight.setDepartureDate(flightDate);
-
-				tempFlight.setBuyLink(buyLinkUrl);
-
-				atlasFlights.add(tempFlight);
-
-			}
+			atlasFlights.add(tempFlight);
 
 		}
 
 		return atlasFlights;
+
+	}
+
+	@Bean
+	public RestTemplate restTemplate() throws KeyStoreException,
+			NoSuchAlgorithmException, KeyManagementException {
+/*
+		TrustStrategy acceptingTrustStrategy = new TrustStrategy() {
+			@Override
+			public boolean isTrusted(X509Certificate[] x509Certificates,
+					String s) throws CertificateException {
+				return true;
+			}
+		};
+
+		SSLContext sslContext = org.apache.http.ssl.SSLContexts.custom()
+				.loadTrustMaterial(null, acceptingTrustStrategy).build();
+
+		SSLConnectionSocketFactory csf = new SSLConnectionSocketFactory(
+				sslContext);
+*/
+		SSLContextBuilder builder = new SSLContextBuilder();
+		builder.loadTrustMaterial(null, new TrustSelfSignedStrategy());
+		SSLConnectionSocketFactory sslConnectionSocketFactory = new SSLConnectionSocketFactory(
+				builder.build(), NoopHostnameVerifier.INSTANCE);
+
+		CloseableHttpClient httpClient = HttpClients.custom()
+				.setSSLSocketFactory(sslConnectionSocketFactory).build();
+
+		RestTemplate restTemplate = new RestTemplate();
+
+		restTemplate.setRequestFactory(
+				new HttpComponentsClientHttpRequestFactory(httpClient) {
+
+					@Override
+					protected HttpContext createHttpContext(
+							HttpMethod httpMethod, URI uri) {
+						HttpClientContext context = HttpClientContext.create();
+						RequestConfig.Builder builder = RequestConfig.custom()
+								.setCookieSpec(CookieSpecs.IGNORE_COOKIES)
+								.setAuthenticationEnabled(false)
+								.setRedirectsEnabled(false)
+								.setConnectTimeout(10000)
+								.setConnectionRequestTimeout(10000)
+								.setSocketTimeout(10000);
+						context.setRequestConfig(builder.build());
+						return context;
+					}
+				});
+
+		List<ClientHttpRequestInterceptor> interceptors = new ArrayList<ClientHttpRequestInterceptor>();
+
+		interceptors.add(new StatefulRestTemplateInterceptor());
+		restTemplate.setInterceptors(interceptors);
+
+		return restTemplate;
+	}
+	
+	public void callHTTPSWithLetsEncryptCertificate(RestTemplate restTemplate) {
+        restTemplate.getForEntity("https://valid-isrgrootx1.letsencrypt.org/", String.class);
+    }
+
+	@SuppressWarnings({ "deprecation", "unused", "unchecked", "rawtypes" })
+	public ArrayList searchFlightPGT(String fromAirportCode,
+			String toAirportCode, String flightDate, String language) {
+
+		ArrayList pegasusFlights = new ArrayList();
+
+		Airport tempFromAirport = airportRepository.findByCode(fromAirportCode);
+		Airport tempToAirport = airportRepository.findByCode(toAirportCode);
+
+		String fromAirportIATACode = tempFromAirport.getIataCode();
+		String toAirportIATACode = tempToAirport.getIataCode();
+
+		String flightDateConverted = flightDate.substring(0, 4) + "-"
+				+ flightDate.substring(4, 6) + "-" + flightDate.substring(6, 8);
+
+		String buyLinkUrl = "https://web.flypgs.com/booking?adultCount=1&arrivalPort=##TO_AIRPORT##&currency=TL&departureDate=##DEPARTURE_DATE##&departurePort=##FROM_AIRPORT##&language=TR";
+
+		buyLinkUrl = StringUtils.replace(buyLinkUrl, "##FROM_AIRPORT##",
+				fromAirportIATACode);
+		buyLinkUrl = StringUtils.replace(buyLinkUrl, "##TO_AIRPORT##",
+				toAirportIATACode);
+		buyLinkUrl = StringUtils.replace(buyLinkUrl, "##DEPARTURE_DATE##",
+				flightDateConverted);
+
+		String jsonInput = "{\"flightSearchList\":[{\"departurePort\":\"##FROM_AIRPORT##\",\"arrivalPort\":\"##TO_AIRPORT##\",\"departureDate\":\"##DEPARTURE_DATE##\"}],\"adultCount\":1,\"childCount\":0,\"infantCount\":0,\"currency\":\"TL\",\"dateOption\":1,\"ffRedemption\":false,\"totalPoints\":null,\"openFlightSearch\":false,\"personnelFlightSearch\":false,\"operationCode\":\"TK\",\"affiliate\":{},\"preventAdara\":false}";
+
+		jsonInput = StringUtils.replace(jsonInput, "##FROM_AIRPORT##",
+				fromAirportIATACode);
+		jsonInput = StringUtils.replace(jsonInput, "##TO_AIRPORT##",
+				toAirportIATACode);
+		jsonInput = StringUtils.replace(jsonInput, "##DEPARTURE_DATE##",
+				flightDateConverted);
+
+		String url = "https://web.flypgs.com/pegasus/availability";
+
+		String cevap = "";
+
+		try {
+
+			RestTemplate restTemplate = restTemplate();
+
+			System.out.println("Before coookie call");
+
+			String cookieResponse = restTemplate.getForObject(buyLinkUrl,
+					String.class);
+
+			System.out.println("After coookie call");
+			System.out.println("Before callHTTPSWithLetsEncryptCertificate call");
+			//callHTTPSWithLetsEncryptCertificate(restTemplate);
+			System.out.println("After callHTTPSWithLetsEncryptCertificate call");
+			HttpHeaders headers = new HttpHeaders();
+			headers.setContentType(MediaType.APPLICATION_JSON);
+
+			headers.set("User-Agent",
+					"Mozilla/5.0 (Windows NT 6.3; Win64; x64; rv:66.0) Gecko/20100101 Firefox/66.0");
+			headers.set("Referer", "https://web.flypgs.com");
+
+			headers.set("Accept", "application/json, text/plain, */*");
+			headers.set("Accept-Language", "tr");
+
+			headers.set("X-PLATFORM", "web");
+			headers.set("X-VERSION", "1.6.0");
+
+			headers.set(HttpHeaders.ACCEPT_ENCODING, "gzip");
+
+			HttpEntity<String> entity = new HttpEntity<String>(jsonInput,
+					headers);
+
+			cevap = restTemplate.postForObject(url, entity, String.class);
+
+		} catch (Exception e) {
+
+			e.printStackTrace();
+
+		}
+
+		cevap = StringUtils.strip(cevap);
+
+		ObjectMapper mapper = new ObjectMapper();
+
+		try {
+
+			JsonNode root = mapper.readTree(cevap);
+
+			// departureRouteList [0] -> dailyFlightList ->[] - flightList[]
+			// flightNo departureDateTime 2019-04-10T07:25:00
+			// fare->shownFare->amount
+
+			JsonNode departureRouteListJSON = root.path("departureRouteList")
+					.get(0);
+
+			JsonNode dailyFlightListJSON = departureRouteListJSON
+					.path("dailyFlightList");
+
+			Flight tempFlight = null;
+
+			if (dailyFlightListJSON.isArray()) {
+
+				for (JsonNode tempDailyFlightListJSON : dailyFlightListJSON) {
+
+					JsonNode flightListJSON = tempDailyFlightListJSON
+							.path("flightList");
+
+					if (flightListJSON.isArray()) {
+
+						for (JsonNode tempFlightListJSON : flightListJSON) {
+
+							String tempFlightCode = tempFlightListJSON
+									.path("flightNo").textValue();
+							String tempDepartureTime = tempFlightListJSON
+									.path("departureDateTime").textValue()
+									.substring(11, 16).replace(":", "");
+
+							try {
+								String fee = tempFlightListJSON.get("fare")
+										.get("shownFare").get("amount")
+										.toString();
+
+								tempFlight = new Flight();
+
+								tempFlight.setFeeAdult(fee);
+
+								tempFlight.setFromAirportCode(fromAirportCode);
+								tempFlight.setFromAirportName(
+										tempFromAirport.getName());
+								tempFlight.setToAirportCode(toAirportCode);
+								tempFlight.setToAirportName(
+										tempToAirport.getName());
+								tempFlight.setDepartureTime(tempDepartureTime);
+								tempFlight.setFlightNo(tempFlightCode);
+								tempFlight.setFlightCode(tempFlightCode);
+
+								Airway a = airwaysRepository.findByCode("PGT");
+
+								tempFlight.setAirwayCode(a.getCode());
+								tempFlight.setAirwayName(a.getName());
+								tempFlight.setAirwayUrl(a.getUrl());
+								tempFlight
+										.setAirwayTelephone(a.getCallCenter());
+
+								tempFlight.setDepartureDate(flightDate);
+
+								tempFlight.setBuyLink(buyLinkUrl);
+
+								pegasusFlights.add(tempFlight);
+							} catch (Exception e) {
+								// TODO Auto-generated catch block
+								e.printStackTrace();
+							}
+
+						}
+
+					}
+
+				}
+
+			}
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+		return pegasusFlights;
 
 	}
 
@@ -1281,13 +1538,15 @@ public class Flight implements Comparable<Flight> {
 				// 20.00, 15.00,
 				// 0.00,'TRY','DEP',100,'1.0#0.6172839506172839#0.44712720769058795#','TRY#USD#EUR#','T',this,'T','TRY','Y');"/>
 
-				if (content.indexOf("onclick=\"javascript:if(!callInternal)") != -1) {
+				if (content.indexOf(
+						"onclick=\"javascript:if(!callInternal)") != -1) {
 
 					tempFlight = new Flight();
 
 					// 35 tl hizmet/vergi ekle
 
-					int indexFeeStart = content.indexOf("applyFilterForIbe(") + 18;
+					int indexFeeStart = content.indexOf("applyFilterForIbe(")
+							+ 18;
 					int indexFeeEnd = content.indexOf(",", indexFeeStart);
 					feeAdult = content.substring(indexFeeStart, indexFeeEnd);
 					feeAdult = feeAdult.trim();
@@ -1348,19 +1607,22 @@ public class Flight implements Comparable<Flight> {
 
 		// Create a trust manager that does not validate certificate
 		// chains
-		TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
-			public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-				return null;
-			}
+		TrustManager[] trustAllCerts = new TrustManager[] {
+				new X509TrustManager() {
+					public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+						return null;
+					}
 
-			public void checkClientTrusted(
-					java.security.cert.X509Certificate[] certs, String authType) {
-			}
+					public void checkClientTrusted(
+							java.security.cert.X509Certificate[] certs,
+							String authType) {
+					}
 
-			public void checkServerTrusted(
-					java.security.cert.X509Certificate[] certs, String authType) {
-			}
-		} };
+					public void checkServerTrusted(
+							java.security.cert.X509Certificate[] certs,
+							String authType) {
+					}
+				} };
 
 		// Install the all-trusting trust manager
 		try {
@@ -1378,8 +1640,7 @@ public class Flight implements Comparable<Flight> {
 			URLConnection uc = url.openConnection();
 			uc.setConnectTimeout(100000);
 			uc.setReadTimeout(100000);
-			uc.setRequestProperty(
-					"User-Agent",
+			uc.setRequestProperty("User-Agent",
 					"Mozilla/5.0 (iPhone; U; CPU iPhone OS 3_0 like Mac OS X; en-us) AppleWebKit/528.18 (KHTML, like Gecko) Version/4.0 Mobile/7A341 Safari/528.16");
 
 			if (referer != null) {
@@ -1397,7 +1658,8 @@ public class Flight implements Comparable<Flight> {
 
 			if (setCookies) {
 
-				for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+				for (int i = 1; (headerName = uc
+						.getHeaderFieldKey(i)) != null; i++) {
 
 					if (headerName.equals("Set-Cookie")) {
 
@@ -1407,8 +1669,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1438,19 +1700,22 @@ public class Flight implements Comparable<Flight> {
 
 		// Create a trust manager that does not validate certificate
 		// chains
-		TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
-			public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-				return null;
-			}
+		TrustManager[] trustAllCerts = new TrustManager[] {
+				new X509TrustManager() {
+					public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+						return null;
+					}
 
-			public void checkClientTrusted(
-					java.security.cert.X509Certificate[] certs, String authType) {
-			}
+					public void checkClientTrusted(
+							java.security.cert.X509Certificate[] certs,
+							String authType) {
+					}
 
-			public void checkServerTrusted(
-					java.security.cert.X509Certificate[] certs, String authType) {
-			}
-		} };
+					public void checkServerTrusted(
+							java.security.cert.X509Certificate[] certs,
+							String authType) {
+					}
+				} };
 
 		// Install the all-trusting trust manager
 		try {
@@ -1472,7 +1737,8 @@ public class Flight implements Comparable<Flight> {
 				uc.setRequestProperty("Referer", referer);
 			}
 
-			for (Iterator iter = SUNEXPRESS_COOKIES.iterator(); iter.hasNext();) {
+			for (Iterator iter = SUNEXPRESS_COOKIES.iterator(); iter
+					.hasNext();) {
 				String element = (String) iter.next();
 				uc.setRequestProperty("Cookie", element);
 			}
@@ -1483,7 +1749,8 @@ public class Flight implements Comparable<Flight> {
 
 			if (setCookies) {
 
-				for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+				for (int i = 1; (headerName = uc
+						.getHeaderFieldKey(i)) != null; i++) {
 
 					if (headerName.equals("Set-Cookie")) {
 
@@ -1493,8 +1760,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1543,7 +1810,8 @@ public class Flight implements Comparable<Flight> {
 
 			THY_COOKIES = new ArrayList();
 
-			for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+			for (int i = 1; (headerName = uc
+					.getHeaderFieldKey(i)) != null; i++) {
 
 				if (headerName.equals("Set-Cookie")) {
 
@@ -1552,8 +1820,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1593,7 +1861,8 @@ public class Flight implements Comparable<Flight> {
 
 			String headerName = null;
 
-			for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+			for (int i = 1; (headerName = uc
+					.getHeaderFieldKey(i)) != null; i++) {
 
 				if (headerName.equals("Set-Cookie")) {
 
@@ -1602,8 +1871,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1643,7 +1912,8 @@ public class Flight implements Comparable<Flight> {
 
 			String headerName = null;
 
-			for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+			for (int i = 1; (headerName = uc
+					.getHeaderFieldKey(i)) != null; i++) {
 
 				if (headerName.equals("Set-Cookie")) {
 
@@ -1652,8 +1922,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1693,7 +1963,8 @@ public class Flight implements Comparable<Flight> {
 
 			String headerName = null;
 
-			for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+			for (int i = 1; (headerName = uc
+					.getHeaderFieldKey(i)) != null; i++) {
 
 				if (headerName.equals("Set-Cookie")) {
 
@@ -1702,8 +1973,8 @@ public class Flight implements Comparable<Flight> {
 				}
 			}
 
-			BufferedReader br = new BufferedReader(new InputStreamReader(
-					uc.getInputStream()));
+			BufferedReader br = new BufferedReader(
+					new InputStreamReader(uc.getInputStream()));
 
 			String buffer = "";
 
@@ -1726,7 +1997,7 @@ public class Flight implements Comparable<Flight> {
 
 	}
 
-	public static String callPegasus(String urlString, boolean logresponse) {
+	public String callPegasus(String urlString, boolean logresponse) {
 
 		StringBuffer sbURLContent = new StringBuffer("");
 
@@ -1734,28 +2005,29 @@ public class Flight implements Comparable<Flight> {
 
 			// Create a trust manager that does not validate certificate
 			// chains
-			TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
-				public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-					return null;
-				}
+			TrustManager[] trustAllCerts = new TrustManager[] {
+					new X509TrustManager() {
+						public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+							return null;
+						}
 
-				public void checkClientTrusted(
-						java.security.cert.X509Certificate[] certs,
-						String authType) {
-				}
+						public void checkClientTrusted(
+								java.security.cert.X509Certificate[] certs,
+								String authType) {
+						}
 
-				public void checkServerTrusted(
-						java.security.cert.X509Certificate[] certs,
-						String authType) {
-				}
-			} };
+						public void checkServerTrusted(
+								java.security.cert.X509Certificate[] certs,
+								String authType) {
+						}
+					} };
 
 			// Install the all-trusting trust manager
 			try {
 				SSLContext sc = SSLContext.getInstance("SSL");
 				sc.init(null, trustAllCerts, new java.security.SecureRandom());
-				HttpsURLConnection.setDefaultSSLSocketFactory(sc
-						.getSocketFactory());
+				HttpsURLConnection
+						.setDefaultSSLSocketFactory(sc.getSocketFactory());
 			} catch (Exception e) {
 				e.printStackTrace();
 			}
@@ -1765,17 +2037,55 @@ public class Flight implements Comparable<Flight> {
 			try {
 
 				URL url = new URL(urlString);
-				URLConnection uc = url.openConnection();
+				HttpURLConnection uc = (HttpURLConnection) url.openConnection();
+
+				uc.setConnectTimeout(10000);
+				uc.setReadTimeout(15000);
 
 				uc.setRequestProperty("User-Agent", USER_AGENT);
 
-				uc.setRequestProperty("Referer", "http://www.flypgs.com/");
+				// uc.setRequestProperty("Referer", "https://www.flypgs.com/");
 
 				uc.setRequestProperty("Cookie", PEGASUS_COOKIE);
 
+				boolean redirect = false;
+
 				String headerName = null;
 
-				for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+				uc.connect();
+
+				// normally, 3xx is redirect
+				int status = uc.getResponseCode();
+				if (status != HttpURLConnection.HTTP_OK) {
+					if (status == HttpURLConnection.HTTP_MOVED_TEMP
+							|| status == HttpURLConnection.HTTP_MOVED_PERM
+							|| status == HttpURLConnection.HTTP_SEE_OTHER)
+						redirect = true;
+				}
+
+				if (redirect) {
+
+					// get redirect url from "location" header field
+					String newUrl = uc.getHeaderField("Location");
+
+					// get the cookie if need, for login
+					String cookies = uc.getHeaderField("Set-Cookie");
+
+					// open the new connnection again
+					uc = (HttpURLConnection) new URL(newUrl).openConnection();
+					uc.setRequestProperty("Cookie", cookies);
+					uc.addRequestProperty("User-Agent", USER_AGENT);
+					uc.addRequestProperty("Referer", "https://www.flypgs.com/");
+
+					System.out.println("Redirect to URL : " + newUrl);
+
+				}
+
+				for (int i = 1; (headerName = uc
+						.getHeaderFieldKey(i)) != null; i++) {
+
+					System.out.println("Header set by pgs " + headerName + " : "
+							+ uc.getHeaderField(i));
 
 					if (headerName.equals("Set-Cookie")) {
 
@@ -1785,8 +2095,8 @@ public class Flight implements Comparable<Flight> {
 					}
 				}
 
-				BufferedReader br = new BufferedReader(new InputStreamReader(
-						uc.getInputStream()));
+				BufferedReader br = new BufferedReader(
+						new InputStreamReader(uc.getInputStream()));
 
 				String buffer = "";
 
@@ -1820,19 +2130,13 @@ public class Flight implements Comparable<Flight> {
 
 	}
 
-	@Value("${log.flights}")
-	private static String logFlights;
+	public void logResponse(String filename, String logcontent) {
 
-	@Value("${log.folder}")
-	private static String logFolder;
-
-	public static void logResponse(String filename, String logcontent) {
-
-		if (logFlights != null && logFlights.trim().equals("true")) {
+		if (flightRestService.logFlights) {
 
 			try {
 
-				String logFileName = logFolder + filename;
+				String logFileName = flightRestService.logFolder + filename;
 
 				File file = new File(logFileName);
 
@@ -1856,7 +2160,7 @@ public class Flight implements Comparable<Flight> {
 
 	}
 
-	public static String callAtlasjet(String urlString, boolean logFile,
+	public String callAtlasjet(String urlString, boolean logFile,
 			String referer) {
 
 		StringBuffer sbURLContent = new StringBuffer("");
@@ -1867,29 +2171,30 @@ public class Flight implements Comparable<Flight> {
 
 				// Create a trust manager that does not validate certificate
 				// chains
-				TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
-					public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-						return null;
-					}
+				TrustManager[] trustAllCerts = new TrustManager[] {
+						new X509TrustManager() {
+							public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+								return null;
+							}
 
-					public void checkClientTrusted(
-							java.security.cert.X509Certificate[] certs,
-							String authType) {
-					}
+							public void checkClientTrusted(
+									java.security.cert.X509Certificate[] certs,
+									String authType) {
+							}
 
-					public void checkServerTrusted(
-							java.security.cert.X509Certificate[] certs,
-							String authType) {
-					}
-				} };
+							public void checkServerTrusted(
+									java.security.cert.X509Certificate[] certs,
+									String authType) {
+							}
+						} };
 
 				// Install the all-trusting trust manager
 				try {
 					SSLContext sc = SSLContext.getInstance("SSL");
 					sc.init(null, trustAllCerts,
 							new java.security.SecureRandom());
-					HttpsURLConnection.setDefaultSSLSocketFactory(sc
-							.getSocketFactory());
+					HttpsURLConnection
+							.setDefaultSSLSocketFactory(sc.getSocketFactory());
 				} catch (Exception e) {
 					e.printStackTrace();
 				}
@@ -1910,7 +2215,8 @@ public class Flight implements Comparable<Flight> {
 
 					String headerName = null;
 
-					for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+					for (int i = 1; (headerName = uc
+							.getHeaderFieldKey(i)) != null; i++) {
 
 						if (headerName.equals("Set-Cookie")) {
 
@@ -1956,8 +2262,8 @@ public class Flight implements Comparable<Flight> {
 
 				String inputLine;
 
-				BufferedReader br = new BufferedReader(new InputStreamReader(
-						uc.getInputStream()));
+				BufferedReader br = new BufferedReader(
+						new InputStreamReader(uc.getInputStream()));
 
 				String buffer = "";
 
@@ -1975,7 +2281,8 @@ public class Flight implements Comparable<Flight> {
 
 				String headerName = null;
 
-				for (int i = 1; (headerName = uc.getHeaderFieldKey(i)) != null; i++) {
+				for (int i = 1; (headerName = uc
+						.getHeaderFieldKey(i)) != null; i++) {
 
 					if (headerName.equals("Set-Cookie")) {
 
@@ -2232,7 +2539,7 @@ public class Flight implements Comparable<Flight> {
 		this.airwaysCompanyTelephone = airwaysCompanyTelephone;
 	}
 
-	public static ArrayList<Flight> searchFlightTHY(String fromAirportCode,
+	public ArrayList<Flight> searchFlightTHY(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		ArrayList<Flight> thyFlights = new ArrayList<Flight>();
@@ -2266,9 +2573,7 @@ public class Flight implements Comparable<Flight> {
 			searchUrl = "https://online.turkishairlines.com/internet-booking/validateSchedulePage.tk?lang=en&hdnNereden=&hdnNereye=&view=external&from=##FROM_AIRPORT##&to=##TO_AIRPORT##&departureDate=##DEPARTURE_DATE##&returnDate=##DEPARTURE_DATE##&flexPriceType=fareDriven&tripType=oneway&lsttypeOfClass=Y&typeOfClass=Y&adult=1&child=0&infant=0&senior=0&student=0&devam=Devam";
 		}
 
-		searchUrl = StringUtils.replace(
-				searchUrl,
-				"##FROM_AIRPORT##",
+		searchUrl = StringUtils.replace(searchUrl, "##FROM_AIRPORT##",
 				fromAirportIATACode + "%2C"
 						+ Airway.convertthyCityCode(fromAirportCode));
 
@@ -2277,9 +2582,7 @@ public class Flight implements Comparable<Flight> {
 					Airway.convertthyCityCode(toAirportCode) + "%2C"
 							+ toAirportIATACode);
 		} else {
-			searchUrl = StringUtils.replace(
-					searchUrl,
-					"##TO_AIRPORT##",
+			searchUrl = StringUtils.replace(searchUrl, "##TO_AIRPORT##",
 					toAirportIATACode + "%2C"
 							+ Airway.convertthyCityCode(toAirportCode));
 		}
@@ -2294,7 +2597,8 @@ public class Flight implements Comparable<Flight> {
 		String cevap3 = callTHY(
 				"https://online.turkishairlines.com/internet-booking/availability.tk;"
 						+ cevap2.substring(cevap2.lastIndexOf("jsessionid="),
-								cevap2.lastIndexOf("</a>")), searchUrl);
+								cevap2.lastIndexOf("</a>")),
+				searchUrl);
 
 		logResponse("THY3_" + System.currentTimeMillis() + " .html", cevap3);
 
@@ -2320,9 +2624,8 @@ public class Flight implements Comparable<Flight> {
 
 				// we found a TR with flight number and at least one fee with
 				// TRY
-				if (contentTR.indexOf("data-cell-value=\"TK") != -1
-						&& contentTR
-								.indexOf("<span class='currency'>TRY</span>") != -1) {
+				if (contentTR.indexOf("data-cell-value=\"TK") != -1 && contentTR
+						.indexOf("<span class='currency'>TRY</span>") != -1) {
 
 				} else {
 					// no flight, step to next table
@@ -2344,22 +2647,24 @@ public class Flight implements Comparable<Flight> {
 				tempFlightNo = StringUtils.replace(tempFlightNo, "\"", "");
 
 				feeAdult = extractByStartWord(contentTR,
-						"<span class='price'> <span class='number'>", "</span>");
+						"<span class='price'> <span class='number'>",
+						"</span>");
 				String fullExpression = "<span class='number'>dolu";
 
 				// cheapest is full so proceed to next fee
 				if (feeAdult.indexOf("dolu") != -1) {
 					feeAdult = extractByStartWord(
-							contentTR.substring(contentTR
-									.indexOf(fullExpression)
-									+ fullExpression.length()),
+							contentTR
+									.substring(contentTR.indexOf(fullExpression)
+											+ fullExpression.length()),
 							"<span class='price'> <span class='number'>",
 							"</span>");
 				}
 				// middle class is also full, proceed business
 				if (feeAdult.indexOf("dolu") != -1) {
-					feeAdult = extractByStartWord(contentTR.substring(contentTR
-							.lastIndexOf(fullExpression)),
+					feeAdult = extractByStartWord(
+							contentTR.substring(
+									contentTR.lastIndexOf(fullExpression)),
 							"<span class='price'> <span class='number'>",
 							"</span>");
 				}
@@ -2414,7 +2719,7 @@ public class Flight implements Comparable<Flight> {
 
 	}
 
-	public static ArrayList<Flight> searchFlightAJA(String fromAirportCode,
+	public ArrayList<Flight> searchFlightAJA(String fromAirportCode,
 			String toAirportCode, String flightDate, String language) {
 
 		ArrayList<Flight> anadolujetFlights = new ArrayList<Flight>();
@@ -2450,7 +2755,7 @@ public class Flight implements Comparable<Flight> {
 
 		searchUrl = StringUtils.replace(searchUrl, "##FROM_AIRPORT##",
 
-		Airway.convertAnadolujetCityCode(fromAirportIATACode));
+				Airway.convertAnadolujetCityCode(fromAirportIATACode));
 
 		if (toAirportCode.equals("LTCH") || toAirportCode.equals("LTAQ")) {
 			searchUrl = StringUtils.replace(searchUrl, "##TO_AIRPORT##",
@@ -2471,7 +2776,8 @@ public class Flight implements Comparable<Flight> {
 		String cevap3 = callTHY(
 				"https://online.turkishairlines.com/internet-booking/availability.tk;"
 						+ cevap2.substring(cevap2.lastIndexOf("jsessionid="),
-								cevap2.lastIndexOf("</a>")), searchUrl);
+								cevap2.lastIndexOf("</a>")),
+				searchUrl);
 
 		logResponse("ANADOLUJET3.html", cevap3);
 
@@ -2497,9 +2803,8 @@ public class Flight implements Comparable<Flight> {
 
 				// we found a TR with flight number and at least one fee with
 				// TRY
-				if (contentTR.indexOf("data-cell-value=\"TK") != -1
-						&& contentTR
-								.indexOf("<span class='currency'>TRY</span>") != -1) {
+				if (contentTR.indexOf("data-cell-value=\"TK") != -1 && contentTR
+						.indexOf("<span class='currency'>TRY</span>") != -1) {
 
 					tempFlightNo = contentTR.substring(contentTR.indexOf("TK"),
 							contentTR.indexOf("TK") + 6);
@@ -2524,22 +2829,24 @@ public class Flight implements Comparable<Flight> {
 				tempFlightNo = StringUtils.replace(tempFlightNo, "\"", "");
 
 				feeAdult = extractByStartWord(contentTR,
-						"<span class='price'> <span class='number'>", "</span>");
+						"<span class='price'> <span class='number'>",
+						"</span>");
 				String fullExpression = "<span class='number'>dolu";
 
 				// cheapest is full so proceed to next fee
 				if (feeAdult.indexOf("dolu") != -1) {
 					feeAdult = extractByStartWord(
-							contentTR.substring(contentTR
-									.indexOf(fullExpression)
-									+ fullExpression.length()),
+							contentTR
+									.substring(contentTR.indexOf(fullExpression)
+											+ fullExpression.length()),
 							"<span class='price'> <span class='number'>",
 							"</span>");
 				}
 				// middle class is also full, proceed business
 				if (feeAdult.indexOf("dolu") != -1) {
-					feeAdult = extractByStartWord(contentTR.substring(contentTR
-							.lastIndexOf(fullExpression)),
+					feeAdult = extractByStartWord(
+							contentTR.substring(
+									contentTR.lastIndexOf(fullExpression)),
 							"<span class='price'> <span class='number'>",
 							"</span>");
 				}
@@ -2586,8 +2893,8 @@ public class Flight implements Comparable<Flight> {
 			e.printStackTrace();
 		}
 
-		anadolujetFlights = new ArrayList<Flight>(new LinkedHashSet<Flight>(
-				anadolujetFlights));
+		anadolujetFlights = new ArrayList<Flight>(
+				new LinkedHashSet<Flight>(anadolujetFlights));
 
 		return anadolujetFlights;
 

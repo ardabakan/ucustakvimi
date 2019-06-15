@@ -1,9 +1,14 @@
 package com.ucustakvimi.rest;
 
 import java.security.Principal;
+import java.sql.Timestamp;
+import java.util.Date;
 import java.util.List;
 
+import javax.servlet.http.HttpServletRequest;
+
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -35,11 +40,18 @@ public class FlightRestService {
 	@Autowired
 	private UserRepository userRepository;
 
+	@Value("${log.flights}")
+	public boolean logFlights;
+
+	@Value("${log.folder}")
+	public String logFolder;
+
 	@RequestMapping(value = "/search/bydateandairway/{f}/{t}/{d}/{a}", method = RequestMethod.GET)
-	public List<Flight> searchByDateAndAirway(
-			@PathVariable("f") String from, @PathVariable("t") String to,
-			@PathVariable("d") String date, @PathVariable("a") String airway,
-			@AuthenticationPrincipal Principal principal) {
+	public List<Flight> searchByDateAndAirway(@PathVariable("f") String from,
+			@PathVariable("t") String to, @PathVariable("d") String date,
+			@PathVariable("a") String airway,
+			@AuthenticationPrincipal Principal principal,
+			HttpServletRequest request) {
 
 		/*
 		 * CurrentUser userSpring = (CurrentUser) SecurityContextHolder
@@ -47,12 +59,25 @@ public class FlightRestService {
 		 * 
 		 * String username = userSpring.getUsername(); // get logged in //
 		 * username FlightUser user = userRepository.findByEmail(username);
+		 * 
+		 * 
 		 */
 
+		String remoteAddr = "";
+
+		if (request != null) {
+			remoteAddr = request.getHeader("X-FORWARDED-FOR");
+			if (remoteAddr == null || "".equals(remoteAddr)) {
+				remoteAddr = request.getRemoteAddr();
+			}
+		}
+
 		FlightSearch flightSearch = new FlightSearch();
+		flightSearch.setIp(remoteAddr);
 		flightSearch.setFromCode(from);
 		flightSearch.setToCode(to);
 		flightSearch.setDate(date);
+		flightSearch.setSearchedOn(new Timestamp(new Date().getTime()));
 
 		flightService.addFlightSearch(flightSearch);
 

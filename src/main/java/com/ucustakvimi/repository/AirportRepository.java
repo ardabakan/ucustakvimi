@@ -15,5 +15,7 @@ public interface AirportRepository extends JpaRepository<Airport, Long> {
 	List<Airport> findAllByOrderByIdDesc();
 
 	List<Airport> findAllByOrderByIdAsc();
+	
+    List<Airport> findByNameIgnoreCaseContaining(String query);
 
 }
